@@ -102,7 +102,7 @@ class Dsp(val n: Int = 2048) {
             }
             size = size shl 1
         }
-        if (inverse) for (i in 0 until n) { re[i] /= n; im[i] /= n }
+        if (inverse) for (i in 0 until n) { re[i] /= n.toDouble(); im[i] /= n.toDouble() }
     }
 
     fun process(left: FloatArray, right: FloatArray, fs: Int) {

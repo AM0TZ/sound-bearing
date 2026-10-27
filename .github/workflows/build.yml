@@ -28,7 +28,7 @@ jobs:
           set -o pipefail
           gradle :app:assembleDebug --no-daemon 2>&1 | tee build.log || {
             # surface the real errors as annotations so they are readable via the API
-            grep -vE "^> Task" build.log | grep -E "^e: |error:|ERROR|What went wrong|Could not|Failed|^> |^  > " | head -9 | while IFS= read -r l; do echo "::error::$l"; done
+            { grep -E "^e: " build.log; grep -vE "^> Task|^> Run with|^> Get more" build.log | grep -E "error:|What went wrong|Could not|^> |^  > "; } | head -9 | while IFS= read -r l; do echo "::error::$l"; done
             exit 1
           }
 
