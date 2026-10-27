@@ -12,9 +12,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -24,7 +24,13 @@ jobs:
           gradle-version: '8.7'
 
       - name: Build
-        run: gradle :app:assembleDebug --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleDebug --no-daemon 2>&1 | tee build.log || {
+            # surface the real errors as annotations so they are readable via the API
+            grep -E "^e: |error:|What went wrong|Could not|> " build.log | head -40 | while IFS= read -r l; do echo "::error::$l"; done
+            exit 1
+          }
 
       - name: Publish APK as the "latest" release
         env:
