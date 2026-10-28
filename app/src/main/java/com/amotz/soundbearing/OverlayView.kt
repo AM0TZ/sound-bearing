@@ -22,6 +22,7 @@ class OverlayView(context: Context, private val dsp: Dsp, private val audio: Aud
     @Volatile var fov = 65f
     @Volatile var cal = 110f
     @Volatile var message = ""
+    @Volatile var holdMs = 4000f       // how long a detected sound stays marked
 
     private val dens = resources.displayMetrics.density
     private fun dp(v: Float) = v * dens
@@ -93,11 +94,15 @@ class OverlayView(context: Context, private val dsp: Dsp, private val audio: Aud
         }
 
         // live marker
-        val age = System.currentTimeMillis() - dsp.lastMs
-        val live = dsp.valid && age < 450
+        val age = (System.currentTimeMillis() - dsp.lastMs).toFloat()
+        val live = dsp.valid && age < holdMs
+        val fresh = dsp.valid && age < 600f
         val th = dsp.theta
         if (live) {
-            val al = 1f - age / 450f
+            // full strength for the first 60% of the hold time, then fade out
+            val al = if (age < holdMs * 0.6f) 1f else 1f - (age - holdMs * 0.6f) / (holdMs * 0.4f)
+            val heat = (dsp.lastDbfs + cal - 35f) / 55f
+            val dbShown = dsp.lastDbfs + cal
             if (abs(th) < half) {
                 val x = xOf(th)
                 val bw = dp(18f) + dp(60f) * (1f - min(1f, dsp.conf * 2f))
@@ -110,7 +115,7 @@ class OverlayView(context: Context, private val dsp: Dsp, private val audio: Aud
                 stroke.color = ramp(heat, al); stroke.strokeWidth = dp(2.5f)
                 c.drawCircle(x, y, r, stroke)
                 stroke.color = ramp(heat, al * 0.5f); stroke.strokeWidth = dp(1f)
-                c.drawCircle(x, y, r + dp(8f) + dp(6f) * sin(System.currentTimeMillis() / 120.0).toFloat(), stroke)
+                if (fresh) c.drawCircle(x, y, r + dp(8f) + dp(6f) * sin(System.currentTimeMillis() / 120.0).toFloat(), stroke)
                 fill.color = ramp(heat, al)
                 c.drawCircle(x, y, dp(3.5f), fill)
                 val side = if (th > 0.5f) " R" else if (th < -0.5f) " L" else ""

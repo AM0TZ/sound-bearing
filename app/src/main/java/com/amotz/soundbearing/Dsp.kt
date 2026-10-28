@@ -34,6 +34,8 @@ class Dsp(val n: Int = 2048) {
     @Volatile var conf = 0f
     @Volatile var dbfs = -120f
     @Volatile var lastMs = 0L
+    @Volatile var lastDbfs = -120f     // loudness at the last detection
+    @Volatile var decay = 0.985f       // per-frame fade of the direction trail
     @Volatile var stereo = "checking"  // checking | ok | dup | onesilent | quiet
 
     private var accE = 0.0
@@ -131,7 +133,7 @@ class Dsp(val n: Int = 2048) {
         }
         val db = (10 * log10((eL + eR) / (2 * n) + 1e-14)).toFloat()
         dbfs = if (dbfs < -100f) db else dbfs * 0.7f + db * 0.3f
-        for (i in hist.indices) hist[i] *= 0.985f
+        for (i in hist.indices) hist[i] *= decay
         if (db < gate || stereo != "ok") return
 
         for (i in 0 until n) {
@@ -179,6 +181,7 @@ class Dsp(val n: Int = 2048) {
         theta = if (valid && now - lastMs < 500) theta + 0.35f * (th - theta) else th
         valid = true
         lastMs = now
+        lastDbfs = db
         conf = c
         val w = c * ((db - gate) / 40f).coerceIn(0.15f, 1f)
         for (b in -12..12) {

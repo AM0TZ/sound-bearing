@@ -64,6 +64,7 @@ class MainActivity : ComponentActivity() {
         overlay = OverlayView(this, dsp, audio)
         overlay.fov = prefs.getFloat("fov", 65f)
         overlay.cal = prefs.getFloat("cal", 110f)
+        setHold(prefs.getFloat("hold", 4f))
         root.addView(previewView, FrameLayout.LayoutParams(-1, -1))
         root.addView(overlay, FrameLayout.LayoutParams(-1, -1))
 
@@ -71,15 +72,22 @@ class MainActivity : ComponentActivity() {
         val bar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(dp(8), dp(8), dp(8), dp(8)) }
         flipBtn = smallButton("") { dsp.flip = !dsp.flip; dsp.clear(); saveFloat("flip", if (dsp.flip) 1f else 0f); updateButtons() }
         srcBtn = smallButton("") { autoProbe = false; srcIdx = (srcIdx + 1) % sources.size; startAudio() }
-        val setBtn = smallButton("Settings") { panel.visibility = if (panel.visibility == ScrollView.VISIBLE) ScrollView.GONE else ScrollView.VISIBLE }
+        val setBtn = smallButton("Settings") { toggleSettings() }
         val clrBtn = smallButton("Clear") { dsp.clear() }
         listOf(flipBtn, srcBtn, clrBtn, setBtn).forEach { bar.addView(it) }
-        root.addView(bar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
 
         // settings panel
         panel = ScrollView(this).apply { visibility = ScrollView.GONE; setBackgroundColor(Color.argb(235, 10, 14, 17)) }
         val col = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(dp(16), dp(56), dp(16), dp(16)) }
         panel.addView(col)
+        col.addView(Button(this).apply {
+            text = "Close settings"
+            isAllCaps = false
+            setTextColor(Color.rgb(26, 18, 5))
+            setBackgroundColor(Color.rgb(255, 176, 32))
+            setOnClickListener { toggleSettings() }
+        })
+        addSlider(col, "How long marks stay on screen", 1, 15, prefs.getFloat("hold", 4f).toInt(), { "$it s" }) { setHold(it.toFloat()); saveFloat("hold", it.toFloat()) }
         addSlider(col, "Mic spacing", 50, 200, (dsp.spacing * 1000).toInt(), { "${it / 10f} cm" }) { dsp.spacing = it / 1000f; saveFloat("spacing", dsp.spacing) }
         addSlider(col, "Camera field of view", 35, 110, overlay.fov.toInt(), { "$it°" }) { overlay.fov = it.toFloat(); saveFloat("fov", overlay.fov) }
         addSlider(col, "Lowest frequency used", 100, 2000, dsp.fLo.toInt(), { "$it Hz" }) { dsp.fLo = it.toFloat(); saveFloat("fLo", dsp.fLo) }
@@ -88,6 +96,10 @@ class MainActivity : ComponentActivity() {
         addSlider(col, "Minimum confidence", 5, 60, (dsp.minConf * 100).toInt(), { String.format("%.2f", it / 100f) }) { dsp.minConf = it / 100f; saveFloat("conf", dsp.minConf) }
         addSlider(col, "dB offset (match a sound meter)", 60, 140, overlay.cal.toInt(), { "+$it" }) { overlay.cal = it.toFloat(); saveFloat("cal", overlay.cal) }
         root.addView(panel, FrameLayout.LayoutParams(dp(320), -1, Gravity.END))
+        // buttons go on top of the panel so Settings can always close it
+        root.addView(bar, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.END))
+        // tapping the camera view outside the panel also closes it
+        overlay.setOnClickListener { if (panel.visibility == ScrollView.VISIBLE) toggleSettings() }
 
         setContentView(root)
         updateButtons()
@@ -166,6 +178,17 @@ class MainActivity : ComponentActivity() {
     private fun updateButtons() {
         flipBtn.text = if (dsp.flip) "L/R swapped" else "Swap L/R"
         srcBtn.text = (if (autoProbe) "Auto: " else "Source: ") + sources[srcIdx].second
+    }
+
+    private fun toggleSettings() {
+        panel.visibility = if (panel.visibility == ScrollView.VISIBLE) ScrollView.GONE else ScrollView.VISIBLE
+    }
+
+    // Marker stays for `sec`; the trail fades to ~5% over three times that.
+    private fun setHold(sec: Float) {
+        overlay.holdMs = sec * 1000f
+        val framesPerSec = 48000f / dsp.n
+        dsp.decay = Math.exp(Math.log(0.05) / (sec * 3f * framesPerSec)).toFloat()
     }
 
     private fun loadPrefs() {
