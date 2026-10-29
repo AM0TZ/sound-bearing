@@ -30,6 +30,7 @@ class SpatialMap {
     val elDeg = FloatArray(size)
     val v = FloatArray(size)                // accumulated evidence
     val lf = FloatArray(size)               // evidence-weighted sum of ln(frequency)
+    val ld = FloatArray(size)               // evidence-weighted sum of dBFS
 
     // Device rotation (device -> world, row-major 3x3), set from the sensor thread.
     @Volatile var rot: FloatArray? = null
@@ -64,11 +65,13 @@ class SpatialMap {
     fun clear() {
         v.fill(0f)
         lf.fill(0f)
+        ld.fill(0f)
         peakIdx = -1; peakVal = 0f; sharpness = 0f
     }
 
     fun decay(f: Float) {
-        for (i in 0 until size) { v[i] *= f; lf[i] *= f }
+        if (f >= 1f) return
+        for (i in 0 until size) { v[i] *= f; lf[i] *= f; ld[i] *= f }
     }
 
     /** Device vector -> world vector using the current rotation (identity if no sensor). */
@@ -93,18 +96,21 @@ class SpatialMap {
     }
 
     /** Add one reading: s = sin(angle from broadside), positive toward screen-right. */
-    fun add(s: Float, weight: Float, logF: Float) {
+    fun add(s: Float, weight: Float, logF: Float, dbfs: Float) {
         val m = toWorld(micAxisDev)
         val k = -1f / (2 * sigma * sigma)
         for (i in 0 until size) {
             val d = m[0] * vx[i] + m[1] * vy[i] + m[2] * vz[i] - s
             val g = d * d * k
-            if (g > -9f) { val e = weight * exp(g); v[i] += e; lf[i] += e * logF }
+            if (g > -9f) { val e = weight * exp(g); v[i] += e; lf[i] += e * logF; ld[i] += e * dbfs }
         }
     }
 
     /** Average frequency (Hz) of the sounds that landed in cell i. */
     fun freqAt(i: Int): Float = if (v[i] > 1e-9f) exp(lf[i] / v[i]) else 1000f
+
+    /** Average loudness (dBFS) of the sounds that landed in cell i. */
+    fun dbAt(i: Int): Float = if (v[i] > 1e-9f) ld[i] / v[i] else -120f
 
     fun refreshPeak() {
         var bi = -1

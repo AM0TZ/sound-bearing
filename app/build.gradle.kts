@@ -11,8 +11,8 @@ android {
         applicationId = "com.amotz.soundbearing"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3"
+        versionCode = 4
+        versionName = "0.4"
     }
 
     // Fixed signing key so new builds install over old ones without uninstalling.

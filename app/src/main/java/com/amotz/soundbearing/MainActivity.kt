@@ -1,6 +1,17 @@
 package com.amotz.soundbearing
 
 import android.Manifest
+import android.content.ContentValues
+import android.content.Intent
+import android.graphics.Bitmap
+import android.net.Uri
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import android.widget.ImageView
+import java.io.File
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.hardware.Sensor
@@ -55,6 +66,21 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var probeWaits = 0
     private var audioOn = false
 
+    // heat-map fade
+    private val fadePresets = listOf(5f, 15f, 30f, 60f, 0f)   // 0 = never fade
+    private var fadeSec = 15f
+    private lateinit var fadeBtn: Button
+    private lateinit var fadeSlider: SeekBar
+
+    // 360 recording
+    private lateinit var recBtn: Button
+    private lateinit var root: FrameLayout
+    private var pano: Panorama? = null
+    private var recording = false
+    private val worker = Executors.newSingleThreadExecutor()
+    private val frameBusy = AtomicBoolean(false)
+    private var resultView: FrameLayout? = null
+
     private val permLauncher = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { res ->
         if (res[Manifest.permission.CAMERA] == true) startCamera()
         if (res[Manifest.permission.RECORD_AUDIO] == true) { if (!audioOn) startAudio() }
@@ -66,7 +92,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         loadPrefs()
 
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(10, 14, 17)) }
+        root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(10, 14, 17)) }
         previewView = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
         dsp.map = spatial
         overlay = OverlayView(this, dsp, audio, spatial)
@@ -82,7 +108,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         srcBtn = smallButton("") { autoProbe = false; srcIdx = (srcIdx + 1) % sources.size; startAudio() }
         val setBtn = smallButton("Settings") { toggleSettings() }
         val clrBtn = smallButton("Clear") { dsp.clear() }
-        listOf(flipBtn, srcBtn, clrBtn, setBtn).forEach { bar.addView(it) }
+        fadeBtn = smallButton("") {
+            val i = fadePresets.indexOf(fadeSec)
+            setFade(fadePresets[(i + 1) % fadePresets.size], true)
+        }
+        recBtn = smallButton("● Record 360") { if (recording) finishRecording() else startRecording() }
+        recBtn.setTextColor(Color.rgb(255, 90, 72))
+        listOf(recBtn, fadeBtn, flipBtn, srcBtn, clrBtn, setBtn).forEach { bar.addView(it) }
 
         // settings panel
         panel = ScrollView(this).apply { visibility = ScrollView.GONE; setBackgroundColor(Color.argb(235, 10, 14, 17)) }
@@ -95,6 +127,9 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             setBackgroundColor(Color.rgb(255, 176, 32))
             setOnClickListener { toggleSettings() }
         })
+        fadeSlider = addSlider(col, "Heat map fade time", 2, 121, if (fadeSec <= 0f) 121 else fadeSec.toInt(), { if (it >= 121) "never" else "$it s" }) {
+            setFade(if (it >= 121) 0f else it.toFloat(), false)
+        }
         addSlider(col, "How long marks stay on screen", 1, 15, prefs.getFloat("hold", 4f).toInt(), { "$it s" }) { setHold(it.toFloat()); saveFloat("hold", it.toFloat()) }
         addSlider(col, "Mic spacing", 50, 200, (dsp.spacing * 1000).toInt(), { "${it / 10f} cm" }) { dsp.spacing = it / 1000f; saveFloat("spacing", dsp.spacing) }
         addSlider(col, "Camera field of view", 35, 110, overlay.fov.toInt(), { "$it°" }) { overlay.fov = it.toFloat(); saveFloat("fov", overlay.fov) }
@@ -110,6 +145,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         overlay.setOnClickListener { if (panel.visibility == ScrollView.VISIBLE) toggleSettings() }
 
         setContentView(root)
+        setFade(fadeSec, false)
         updateButtons()
         requestOrStart()
     }
@@ -131,6 +167,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onPause() {
         super.onPause()
+        if (recording) cancelRecording()
         sensors.unregisterListener(this)
         main.removeCallbacksAndMessages(null)
         audio.stop()
@@ -222,11 +259,163 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         panel.visibility = if (panel.visibility == ScrollView.VISIBLE) ScrollView.GONE else ScrollView.VISIBLE
     }
 
-    // Marker stays for `sec`; the trail fades to ~5% over three times that.
+    // How long the crosshair marker stays after a detection.
     private fun setHold(sec: Float) {
         overlay.holdMs = sec * 1000f
+    }
+
+    private fun decayFor(sec: Float): Float {
+        if (sec <= 0f) return 1f
         val framesPerSec = 48000f / dsp.n
-        dsp.decay = Math.exp(Math.log(0.05) / (sec * 3f * framesPerSec)).toFloat()
+        return Math.exp(Math.log(0.05) / (sec * framesPerSec)).toFloat()
+    }
+
+    // Heat map fades to ~5% after `sec` seconds; 0 = never fades.
+    private fun setFade(sec: Float, fromButton: Boolean) {
+        fadeSec = sec
+        if (!recording) dsp.decay = decayFor(sec)
+        saveFloat("fade", sec)
+        fadeBtn.text = if (sec <= 0f) "Fade: never" else "Fade: ${sec.toInt()} s"
+        if (fromButton && ::fadeSlider.isInitialized) fadeSlider.progress = if (sec <= 0f) 121 else sec.toInt()
+    }
+
+    // ---------------- 360 recording ----------------
+
+    private fun startRecording() {
+        val rot = spatial.rot
+        if (rot == null) { overlay.message = "This phone has no motion sensor, so a 360 can't be recorded."; return }
+        if (panel.visibility == ScrollView.VISIBLE) toggleSettings()
+        val startAz = SpatialMap.azimuthOf(spatial.cameraForward())
+        pano = Panorama(2048, 1024, startAz)
+        dsp.clear()
+        dsp.decay = 1f                      // keep every sound heard during the sweep
+        recording = true
+        recBtn.text = "■ Finish 360"
+        overlay.message = "Recording 360: turn slowly in a full circle, tilting up and down a little"
+        main.post(captureTick)
+    }
+
+    private val captureTick: Runnable = object : Runnable {
+        override fun run() {
+            if (!recording) return
+            val p = pano ?: return
+            val rot = spatial.rot
+            if (rot != null && !frameBusy.get()) {
+                val full = previewView.bitmap
+                if (full != null) {
+                    val sw = 640
+                    val sh = (640f * full.height / full.width).toInt().coerceAtLeast(1)
+                    val small = Bitmap.createScaledBitmap(full, sw, sh, true)
+                    if (small != full) full.recycle()
+                    val r = rot.copyOf()
+                    val right = spatial.rightDev.copyOf()
+                    val up = spatial.upDev.copyOf()
+                    val fov = overlay.fov
+                    frameBusy.set(true)
+                    worker.execute {
+                        try {
+                            p.addFrame(small, r, right, up, fov)
+                            val cov = (p.coverage() * 100).toInt()
+                            main.post {
+                                if (recording) overlay.message = "Recording 360: $cov% of the room covered. Keep turning slowly, then tap Finish."
+                            }
+                        } finally {
+                            small.recycle()
+                            frameBusy.set(false)
+                        }
+                    }
+                }
+            }
+            main.postDelayed(this, 250)
+        }
+    }
+
+    private fun cancelRecording() {
+        recording = false
+        main.removeCallbacks(captureTick)
+        pano = null
+        dsp.decay = decayFor(fadeSec)
+        recBtn.text = "● Record 360"
+        overlay.message = ""
+    }
+
+    private fun finishRecording() {
+        val p = pano ?: return cancelRecording()
+        recording = false
+        main.removeCallbacks(captureTick)
+        recBtn.text = "● Record 360"
+        recBtn.isEnabled = false
+        overlay.message = "Building the 360 image…"
+        val cal = overlay.cal
+        worker.execute {
+            try {
+                val (bmp, sources) = p.render(spatial, cal, 1.4f)
+                val bytes = Panorama.jpegWith360Metadata(bmp)
+                val (uri, where) = saveJpeg(bytes)
+                main.post {
+                    dsp.decay = decayFor(fadeSec)
+                    recBtn.isEnabled = true
+                    overlay.message = ""
+                    showResult(bmp, uri, where, sources.size)
+                }
+            } catch (e: Exception) {
+                main.post {
+                    dsp.decay = decayFor(fadeSec)
+                    recBtn.isEnabled = true
+                    overlay.message = "Could not build the 360 image: ${e.message}"
+                }
+            }
+            pano = null
+        }
+    }
+
+    private fun saveJpeg(bytes: ByteArray): Pair<Uri?, String> {
+        val name = "SoundBearing360_" + java.text.SimpleDateFormat("yyyyMMdd_HHmmss", java.util.Locale.US).format(java.util.Date()) + ".jpg"
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, name)
+                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/SoundBearing")
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                ?: throw IllegalStateException("gallery refused the file")
+            contentResolver.openOutputStream(uri)!!.use { it.write(bytes) }
+            return Pair(uri, "Pictures/SoundBearing/$name")
+        }
+        val dir = getExternalFilesDir(Environment.DIRECTORY_PICTURES) ?: filesDir
+        val f = File(dir, name)
+        f.writeBytes(bytes)
+        return Pair(null, f.absolutePath)
+    }
+
+    private fun showResult(bmp: Bitmap, uri: Uri?, where: String, nSources: Int) {
+        resultView?.let { root.removeView(it) }
+        val box = FrameLayout(this).apply { setBackgroundColor(Color.rgb(6, 8, 10)); isClickable = true }
+        val img = ImageView(this).apply { setImageBitmap(bmp); scaleType = ImageView.ScaleType.FIT_CENTER }
+        box.addView(img, FrameLayout.LayoutParams(-1, -1))
+        val bottom = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(Color.argb(210, 10, 14, 17))
+        }
+        val info = TextView(this).apply {
+            setTextColor(Color.rgb(230, 238, 240)); textSize = 12f
+            text = "$nSources noise source(s) marked · saved to $where" + if (uri != null) " · opens as a 360° photo in Google Photos" else ""
+        }
+        bottom.addView(info, LinearLayout.LayoutParams(0, -2, 1f))
+        if (uri != null) bottom.addView(smallButton("Share") {
+            val send = Intent(Intent.ACTION_SEND).apply {
+                type = "image/jpeg"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            startActivity(Intent.createChooser(send, "Share 360 sound map"))
+        })
+        bottom.addView(smallButton("Close") { root.removeView(box); resultView = null })
+        box.addView(bottom, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+        root.addView(box, FrameLayout.LayoutParams(-1, -1))
+        resultView = box
     }
 
     private fun loadPrefs() {
@@ -237,6 +426,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         dsp.minConf = prefs.getFloat("conf", 0.25f)
         dsp.flip = prefs.getFloat("flip", 0f) > 0.5f
         srcIdx = prefs.getInt("src", 0).coerceIn(0, sources.size - 1)
+        fadeSec = prefs.getFloat("fade", 15f)
     }
 
     private fun saveFloat(key: String, v: Float) { prefs.edit().putFloat(key, v).apply() }
@@ -256,7 +446,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         setOnClickListener { onClick() }
     }
 
-    private fun addSlider(parent: LinearLayout, label: String, min: Int, max: Int, value: Int, fmt: (Int) -> String, onChange: (Int) -> Unit) {
+    private fun addSlider(parent: LinearLayout, label: String, min: Int, max: Int, value: Int, fmt: (Int) -> String, onChange: (Int) -> Unit): SeekBar {
         val title = TextView(this).apply { setTextColor(Color.rgb(143, 161, 168)); textSize = 12f; setPadding(0, dp(10), 0, 0) }
         val bar = SeekBar(this)
         bar.min = min
@@ -273,5 +463,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         })
         parent.addView(title)
         parent.addView(bar)
+        return bar
     }
 }

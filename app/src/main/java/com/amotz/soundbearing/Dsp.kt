@@ -205,7 +205,7 @@ class Dsp(val n: Int = 2048) {
             val i = th.roundToInt() + 90 + b
             if (i in 0..180) hist[i] += w * exp(-(b * b) / 32f)
         }
-        map?.add(if (flip) -s.toFloat() else s.toFloat(), w, logF)
+        map?.add(if (flip) -s.toFloat() else s.toFloat(), w, logF, db)
     }
 
     companion object {
