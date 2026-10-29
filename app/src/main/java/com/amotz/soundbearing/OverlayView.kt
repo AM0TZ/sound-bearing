@@ -15,6 +15,7 @@ import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.hypot
+import kotlin.math.ln
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -50,6 +51,16 @@ class OverlayView(
 
     private val stopPos = floatArrayOf(0f, 0.45f, 0.8f, 1f)
     private val stopCol = arrayOf(intArrayOf(31, 184, 166), intArrayOf(255, 176, 32), intArrayOf(255, 77, 61), intArrayOf(255, 236, 220))
+
+    /** Pitch colour: 80 Hz deep red → 300 Hz orange → 1 kHz green → 3 kHz blue → 8 kHz violet. */
+    private fun freqColor(hz: Float, alpha: Float, bright: Float = 1f): Int {
+        val t = ((ln(hz.coerceIn(80f, 8000f)) - ln(80f)) / (ln(8000f) - ln(80f)))
+        val hue = t * 280f                      // 0 = red … 280 = violet
+        val a = (alpha.coerceIn(0f, 1f) * 255).roundToInt()
+        return Color.HSVToColor(a, floatArrayOf(hue, 0.85f, (0.55f + 0.45f * bright).coerceIn(0f, 1f)))
+    }
+
+    private fun hzText(hz: Float) = if (hz >= 1000f) String.format("%.1f kHz", hz / 1000f) else "${(hz / 10f).roundToInt() * 10} Hz"
 
     private fun ramp(v0: Float, alpha: Float): Int {
         val v = v0.coerceIn(0f, 1f)
@@ -118,7 +129,7 @@ class OverlayView(
                 if (!project(map.vx[i], map.vy[i], map.vz[i], w, h, tH, tV)) continue
                 if (px < -cellPx || px > w + cellPx || py < -cellPx || py > h + cellPx) continue
                 val s = cellPx / camF
-                fill.color = ramp(0.2f + v * 0.7f, (v - 0.25f) * 0.55f)
+                fill.color = freqColor(map.freqAt(i), (v - 0.25f) * 0.55f, v)
                 c.drawCircle(px, py, s, fill)
             }
         }
@@ -133,9 +144,11 @@ class OverlayView(
         } else { relAz = 0f; elev = 0f }
 
         if (peak >= 0 && live && locked) {
-            val col = ramp(heat, al)
+            val pHz = map.freqAt(peak)
+            val col = freqColor(pHz, al)
+            val labelCol = freqColor(pHz, 1f)
             val dirTxt = dirText(relAz, elev)
-            val lbl = "${dbAtHit.roundToInt()} dB*  $dirTxt"
+            val lbl = "${dbAtHit.roundToInt()} dB*  ${hzText(map.freqAt(peak))}  $dirTxt"
             if (project(map.vx[peak], map.vy[peak], map.vz[peak], w, h, tH, tV) && px in 0f..w && py in 0f..h) {
                 val x = px
                 val y = py
@@ -148,10 +161,10 @@ class OverlayView(
                 c.drawLine(x - g, y, x - r + dp(4f), y, stroke); c.drawLine(x + r - dp(4f), y, x + g, y, stroke)
                 c.drawLine(x, y - g, x, y - r + dp(4f), stroke); c.drawLine(x, y + r - dp(4f), x, y + g, stroke)
                 if (fresh) {
-                    stroke.color = ramp(heat, al * 0.5f); stroke.strokeWidth = dp(1f)
+                    stroke.color = freqColor(pHz, al * 0.5f); stroke.strokeWidth = dp(1f)
                     c.drawCircle(x, y, r + dp(14f) + dp(6f) * sin(now / 120.0).toFloat(), stroke)
                 }
-                drawLabel(c, lbl, x, y - g - dp(10f), ramp(heat, 1f))
+                drawLabel(c, lbl, x, y - g - dp(10f), labelCol)
             } else {
                 // off screen or behind: arrow on the edge, pointing toward it
                 var ax = camR
@@ -170,7 +183,7 @@ class OverlayView(
                 path.close()
                 fill.color = col
                 c.drawPath(path, fill)
-                drawLabel(c, lbl, (x - cos(ang) * dp(60f)).coerceIn(dp(90f), w - dp(90f)), (y - sin(ang) * dp(34f)).coerceIn(dp(30f), h - dp(20f)), ramp(heat, 1f))
+                drawLabel(c, lbl, (x - cos(ang) * dp(60f)).coerceIn(dp(90f), w - dp(90f)), (y - sin(ang) * dp(34f)).coerceIn(dp(30f), h - dp(20f)), labelCol)
             }
         }
 
@@ -181,7 +194,7 @@ class OverlayView(
         val pxL = dp(12f)
         val pyT = dp(12f)
         fill.color = Color.argb(185, 10, 14, 17)
-        rect.set(pxL, pyT, pxL + dp(240f), pyT + dp(168f))
+        rect.set(pxL, pyT, pxL + dp(240f), pyT + dp(208f))
         c.drawRoundRect(rect, dp(10f), dp(10f), fill)
         text.textAlign = Paint.Align.LEFT
         text.textSize = dp(30f); text.color = Color.rgb(230, 238, 240)
@@ -205,6 +218,7 @@ class OverlayView(
         }
         val lines = listOf(
             "direction  $fixTxt",
+            "pitch      " + (if (live) hzText(dsp.lastFreq) else "—"),
             "2-mic      " + (if (live) "${dsp.theta.roundToInt()}° L/R" else "—"),
             "fix        " + fixQuality(peak, locked),
             "confidence " + (if (live) String.format("%.2f", dsp.conf) else "—"),
@@ -214,6 +228,24 @@ class OverlayView(
         for (ln in lines) { c.drawText(ln, pxL + dp(12f), ly, text); ly += dp(17f) }
         text.color = stCol
         c.drawText(stTxt, pxL + dp(12f), ly + dp(2f), text)
+        // pitch colour legend
+        val lx0 = pxL + dp(12f)
+        val lx1 = pxL + dp(228f)
+        val lyB = ly + dp(12f)
+        val steps = 48
+        for (k in 0 until steps) {
+            val f = 80f * Math.pow(100.0, k / (steps - 1.0)).toFloat()
+            fill.color = freqColor(f, 1f)
+            val xa = lx0 + (lx1 - lx0) * k / steps
+            c.drawRect(xa, lyB, xa + (lx1 - lx0) / steps + 1f, lyB + dp(6f), fill)
+        }
+        text.textSize = dp(9f); text.color = Color.rgb(143, 161, 168)
+        for ((f, lbl) in listOf(100f to "100", 300f to "300", 1000f to "1k", 3000f to "3k", 8000f to "8k Hz")) {
+            val xf = lx0 + (lx1 - lx0) * (ln(f) - ln(80f)) / (ln(8000f) - ln(80f))
+            text.textAlign = if (f >= 8000f) Paint.Align.RIGHT else Paint.Align.CENTER
+            c.drawText(lbl, if (f >= 8000f) lx1 else xf, lyB + dp(17f), text)
+        }
+        text.textAlign = Paint.Align.LEFT
 
         if (message.isNotEmpty()) {
             text.textSize = dp(13f); text.textAlign = Paint.Align.CENTER; text.color = Color.WHITE
@@ -282,7 +314,7 @@ class OverlayView(
                 val v = map.v[i] / pv
                 if (v < 0.35f) continue
                 val (x, y) = pos(map.azDeg[i], map.elDeg[i])
-                fill.color = ramp(0.2f + v * 0.7f, (v - 0.3f) * 0.9f)
+                fill.color = freqColor(map.freqAt(i), (v - 0.3f) * 0.9f, v)
                 c.drawCircle(x, y, dp(1.6f) + v * dp(2.2f), fill)
             }
         }
@@ -290,9 +322,9 @@ class OverlayView(
         if (peak >= 0 && locked) {
             val (x, y) = pos(map.azDeg[peak], map.elDeg[peak])
             val a = if (live) max(al, 0.45f) else 0.45f
-            fill.color = ramp(heat, a)
+            fill.color = freqColor(map.freqAt(peak), a)
             c.drawCircle(x, y, dp(5f), fill)
-            stroke.color = ramp(heat, a); stroke.strokeWidth = dp(1.5f)
+            stroke.color = freqColor(map.freqAt(peak), a); stroke.strokeWidth = dp(1.5f)
             c.drawCircle(x, y, dp(9f), stroke)
         }
 

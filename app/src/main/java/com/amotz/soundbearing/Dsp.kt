@@ -35,6 +35,7 @@ class Dsp(val n: Int = 2048) {
     @Volatile var dbfs = -120f
     @Volatile var lastMs = 0L
     @Volatile var lastDbfs = -120f     // loudness at the last detection
+    @Volatile var lastFreq = 0f        // typical frequency (Hz) of the last detection
     @Volatile var decay = 0.985f       // per-frame fade of the direction trail
     @Volatile var map: SpatialMap? = null
     @Volatile var stereo = "checking"  // checking | ok | dup | onesilent | quiet
@@ -147,6 +148,18 @@ class Dsp(val n: Int = 2048) {
         fft(r1, i1, false)
         fft(r2, i2, false)
 
+        // typical pitch of this frame: power-weighted average of log frequency, 50 Hz – 12 kHz
+        var pSum = 0.0
+        var lfSum = 0.0
+        val k0 = max(1, (50f * n / fs).toInt())
+        val k1 = min(n / 2 - 1, (12000f * n / fs).toInt())
+        for (k in k0..k1) {
+            val p = r1[k] * r1[k] + i1[k] * i1[k] + r2[k] * r2[k] + i2[k] * i2[k]
+            pSum += p
+            lfSum += p * ln(k.toDouble() * fs / n)
+        }
+        val logF = if (pSum > 0) (lfSum / pSum).toFloat() else ln(1000f)
+
         val kLo = max(1, ceil(fLo * n / fs).toInt())
         val kHi = min(n / 2 - 1, floor(max(fHi, fLo + 100f) * n / fs).toInt())
         var nb = 0
@@ -185,13 +198,14 @@ class Dsp(val n: Int = 2048) {
         valid = true
         lastMs = now
         lastDbfs = db
+        lastFreq = kotlin.math.exp(logF)
         conf = c
         val w = c * ((db - gate) / 40f).coerceIn(0.15f, 1f)
         for (b in -12..12) {
             val i = th.roundToInt() + 90 + b
             if (i in 0..180) hist[i] += w * exp(-(b * b) / 32f)
         }
-        map?.add(if (flip) -s.toFloat() else s.toFloat(), w)
+        map?.add(if (flip) -s.toFloat() else s.toFloat(), w, logF)
     }
 
     companion object {
