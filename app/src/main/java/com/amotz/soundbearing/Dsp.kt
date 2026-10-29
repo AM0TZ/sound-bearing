@@ -36,6 +36,7 @@ class Dsp(val n: Int = 2048) {
     @Volatile var lastMs = 0L
     @Volatile var lastDbfs = -120f     // loudness at the last detection
     @Volatile var decay = 0.985f       // per-frame fade of the direction trail
+    @Volatile var map: SpatialMap? = null
     @Volatile var stereo = "checking"  // checking | ok | dup | onesilent | quiet
 
     private var accE = 0.0
@@ -70,6 +71,7 @@ class Dsp(val n: Int = 2048) {
 
     fun clear() {
         hist.fill(0f)
+        map?.clear()
         valid = false
     }
 
@@ -134,6 +136,7 @@ class Dsp(val n: Int = 2048) {
         val db = (10 * log10((eL + eR) / (2 * n) + 1e-14)).toFloat()
         dbfs = if (dbfs < -100f) db else dbfs * 0.7f + db * 0.3f
         for (i in hist.indices) hist[i] *= decay
+        map?.decay(decay)
         if (db < gate || stereo != "ok") return
 
         for (i in 0 until n) {
@@ -188,6 +191,7 @@ class Dsp(val n: Int = 2048) {
             val i = th.roundToInt() + 90 + b
             if (i in 0..180) hist[i] += w * exp(-(b * b) / 32f)
         }
+        map?.add(if (flip) -s.toFloat() else s.toFloat(), w)
     }
 
     companion object {

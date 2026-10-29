@@ -3,6 +3,11 @@ package com.amotz.soundbearing
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Color
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.view.Surface
 import android.media.MediaRecorder
 import android.os.Bundle
 import android.os.Handler
@@ -24,8 +29,10 @@ import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 
-class MainActivity : ComponentActivity() {
+class MainActivity : ComponentActivity(), SensorEventListener {
     private val dsp = Dsp()
+    private val spatial = SpatialMap()
+    private val sensors by lazy { getSystemService(SENSOR_SERVICE) as SensorManager }
     private val audio = AudioEngine(dsp)
     private lateinit var overlay: OverlayView
     private lateinit var previewView: PreviewView
@@ -61,7 +68,8 @@ class MainActivity : ComponentActivity() {
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.rgb(10, 14, 17)) }
         previewView = PreviewView(this).apply { scaleType = PreviewView.ScaleType.FILL_CENTER }
-        overlay = OverlayView(this, dsp, audio)
+        dsp.map = spatial
+        overlay = OverlayView(this, dsp, audio, spatial)
         overlay.fov = prefs.getFloat("fov", 65f)
         overlay.cal = prefs.getFloat("cal", 110f)
         setHold(prefs.getFloat("hold", 4f))
@@ -114,11 +122,16 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        updateScreenAxes()
+        val rv = sensors.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR) ?: sensors.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+        if (rv != null) sensors.registerListener(this, rv, SensorManager.SENSOR_DELAY_GAME)
+        else overlay.message = "No motion sensor: up/down can't be measured on this phone."
         if (::overlay.isInitialized && hasMic() && !audioOn) startAudio()
     }
 
     override fun onPause() {
         super.onPause()
+        sensors.unregisterListener(this)
         main.removeCallbacksAndMessages(null)
         audio.stop()
         audioOn = false
@@ -178,6 +191,31 @@ class MainActivity : ComponentActivity() {
     private fun updateButtons() {
         flipBtn.text = if (dsp.flip) "L/R swapped" else "Swap L/R"
         srcBtn.text = (if (autoProbe) "Auto: " else "Source: ") + sources[srcIdx].second
+    }
+
+    override fun onSensorChanged(e: SensorEvent) {
+        val r = FloatArray(9)
+        SensorManager.getRotationMatrixFromVector(r, e.values)
+        spatial.rot = r
+    }
+
+    override fun onAccuracyChanged(s: Sensor?, a: Int) {}
+
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateScreenAxes()
+    }
+
+    // Which device axes point to screen-right and screen-up for the current rotation.
+    @Suppress("DEPRECATION")
+    private fun updateScreenAxes() {
+        when (windowManager.defaultDisplay.rotation) {
+            Surface.ROTATION_90 -> { spatial.rightDev = floatArrayOf(0f, -1f, 0f); spatial.upDev = floatArrayOf(1f, 0f, 0f) }
+            Surface.ROTATION_270 -> { spatial.rightDev = floatArrayOf(0f, 1f, 0f); spatial.upDev = floatArrayOf(-1f, 0f, 0f) }
+            Surface.ROTATION_180 -> { spatial.rightDev = floatArrayOf(-1f, 0f, 0f); spatial.upDev = floatArrayOf(0f, -1f, 0f) }
+            else -> { spatial.rightDev = floatArrayOf(1f, 0f, 0f); spatial.upDev = floatArrayOf(0f, 1f, 0f) }
+        }
+        dsp.clear()
     }
 
     private fun toggleSettings() {
